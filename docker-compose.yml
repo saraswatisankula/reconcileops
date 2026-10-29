@@ -1,0 +1,77 @@
+# ReconcileOps local stack.
+# Two separate PostgreSQL servers keep ReconcileOps' own metadata apart from
+# the demo database that migrations are executed against.
+
+services:
+  meta-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: reconcileops_meta
+      POSTGRES_USER: ${META_DB_USER:-rops}
+      POSTGRES_PASSWORD: ${META_DB_PASSWORD:?set META_DB_PASSWORD in .env}
+    volumes:
+      - meta-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d reconcileops_meta"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  demo-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: reconcileops_demo
+      POSTGRES_USER: ${DEMO_DB_USER:-demo}
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:?set DEMO_DB_PASSWORD in .env}
+    volumes:
+      - demo-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d reconcileops_demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Applies backend/db/migrations to the metadata database, then exits.
+  flyway:
+    image: flyway/flyway:10-alpine
+    command: -connectRetries=10 migrate
+    environment:
+      FLYWAY_URL: jdbc:postgresql://meta-db:5432/reconcileops_meta
+      FLYWAY_USER: ${META_DB_USER:-rops}
+      FLYWAY_PASSWORD: ${META_DB_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./backend/db/migrations:/flyway/sql:ro
+    depends_on:
+      meta-db:
+        condition: service_healthy
+
+  backend:
+    build: ./backend
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      META_DATABASE_URL: postgres://${META_DB_USER:-rops}:${META_DB_PASSWORD}@meta-db:5432/reconcileops_meta
+      DEMO_DATABASE_URL: postgres://${DEMO_DB_USER:-demo}:${DEMO_DB_PASSWORD}@demo-db:5432/reconcileops_demo
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      API_TOKEN: ${API_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      flyway:
+        condition: service_completed_successfully
+      demo-db:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  meta-data:
+  demo-data:
